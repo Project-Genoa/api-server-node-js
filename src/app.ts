@@ -15,6 +15,7 @@ app.use('/', require('./middleware/log'))
 app.use('/', require('./middleware/force-content-type-on-304')) // the Minecraft Earth HTTP client is broken, sending a 304 without a "Content-Type: application/json" header causes an "unable to load" error to be shown even though the HTTP spec allows this
 
 app.use('/', require('./routes/locator'))
+app.use('/', require('./routes/resourcepack'))
 app.use('/', require('./routes/signin'))
 app.use(config.authenticatedBasePath, require('./routes/authenticated'))
 
