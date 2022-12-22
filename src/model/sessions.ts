@@ -201,12 +201,10 @@ export class ModifiableSession extends RequestSession {
           return {}
         }
 
-        var resultIndex = 0
         const updatedFields: { [field: string]: number | undefined } = {}
         for (const field in this.sequences) {
           if (this.sequences[field as SequenceField].invalidated) {
-            const value = results[resultIndex] as number
-            resultIndex++
+            const value = results[field] as number
 
             this.sequences[field as SequenceField].value = value
             this.sequences[field as SequenceField].invalidated = false
