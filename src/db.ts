@@ -21,6 +21,8 @@ export async function connect() {
       }
     }
   }
+
+  await database.createIndex('session', { 'value.refreshed': 1 }, { expireAfterSeconds: 3600 })
 }
 
 export class Transaction {

@@ -21,7 +21,9 @@ interface SessionDbRecord {
     journal: number,
     challenges: number,
     tokens: number
-  }
+  },
+
+  refreshed: Date
 }
 
 export default class Sessions {
@@ -44,20 +46,7 @@ export default class Sessions {
     const session = await db.Transaction.runWithTransaction(async transaction => {
       const sessionRecord = await transaction.get('session', sessionId) as SessionDbRecord | null
       if (sessionRecord != null) {
-        // TODO: implement expiry for MongoDB
-        /*try {
-          const multi = db.multi()
-          multi.expire(key, config.sessionExpiryDuration)
-          await multi.exec()
-        }
-        catch (err) {
-          if (err instanceof db.ConflictError) {
-            // empty
-          }
-          else {
-            throw err
-          }
-        }*/
+        await transaction.set('session', sessionId, 'refreshed', new Date())
         return sessionRecord
       }
       else {
@@ -111,7 +100,9 @@ export default class Sessions {
         journal: 1,
         challenges: 1,
         tokens: 1
-      }
+      },
+
+      refreshed: new Date()
     }
 
     const alreadyExists = !await db.Transaction.runWithTransaction(async transaction => {
@@ -119,9 +110,6 @@ export default class Sessions {
         return false
       }
       await transaction.set('session', session.sessionId, null, session)
-      // TODO: implement expiry for MongoDB
-      //multi.expire(key, config.sessionExpiryDuration)
-      //await multi.exec()
       return true
     })
     if (alreadyExists) {
