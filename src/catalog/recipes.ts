@@ -2,6 +2,9 @@ import { Catalog, readJSONFile, getJSONFilesInDir } from './catalog'
 import path from 'path'
 
 export interface CraftingRecipe {
+  id: string,
+  deprecated: boolean,
+  displayCategory: 'Construction' | 'Equipment' | 'Items' | 'Nature',
   input: { itemIds: string[], count: number }[],
   output: { itemId: string, count: number },
   returnItems: { itemId: string, count: number }[],
@@ -9,48 +12,50 @@ export interface CraftingRecipe {
 }
 
 export interface SmeltingRecipe {
+  id: string,
+  deprecated: boolean,
   input: string,
   output: string,
   heatRequired: number
 }
 
 class RecipesCatalog extends Catalog {
-  private recipes: { crafting: object[], smelting: object[] } = { crafting: [], smelting: [] }
+  private apiResponse: { crafting: any[], smelting: any[] } = { crafting: [], smelting: [] }
+
   private craftingRecipesMap: { [index: string]: CraftingRecipe } = {}
   private smeltingRecipesMap: { [index: string]: SmeltingRecipe } = {}
 
   protected async doLoadData(): Promise<void> {
-    var crafting = []
     for (const filePath of await getJSONFilesInDir(path.join('recipes', 'crafting'))) {
-      const recipe = await readJSONFile(filePath)
-      crafting.push(recipe)
-      this.craftingRecipesMap[recipe.id] = {
-        input: (recipe.ingredients as { quantity: number, items: string[] }[]).map(ingredient => ({ itemIds: ingredient.items, count: ingredient.quantity })),
-        output: { itemId: recipe.output.itemId as string, count: recipe.output.quantity as number },
-        returnItems: (recipe.returnItems as { id: string, amount: number }[]).map(item => ({ itemId: item.id, count: item.amount })),
-        duration: (recipe.duration as string).split(':').reduce((sum, part) => sum * 60 + parseInt(part), 0)
-      }
+      const recipe = await readJSONFile(filePath) as CraftingRecipe
+      this.craftingRecipesMap[recipe.id] = recipe
+      this.apiResponse.crafting.push({
+        id: recipe.id,
+        deprecated: recipe.deprecated,
+        category: recipe.displayCategory,
+        ingredients: recipe.input.map(ingredient => ({ items: ingredient.itemIds, quantity: ingredient.count })),
+        output: { itemId: recipe.output.itemId, quantity: recipe.output.count },
+        returnItems: recipe.returnItems.map(item => ({ id: item.itemId, amount: item.count })),
+        duration: '00:00:' + recipe.duration
+      })
     }
 
-    var smelting = []
     for (const filePath of await getJSONFilesInDir(path.join('recipes', 'smelting'))) {
-      const recipe = await readJSONFile(filePath)
-      smelting.push(recipe)
-      this.smeltingRecipesMap[recipe.id] = {
-        input: recipe.inputItemId as string,
-        output: recipe.output.itemId as string,
-        heatRequired: recipe.heatRequired as number
-      }
-    }
-
-    this.recipes = {
-      crafting: crafting,
-      smelting: smelting
+      const recipe = await readJSONFile(filePath) as SmeltingRecipe
+      this.smeltingRecipesMap[recipe.id] = recipe
+      this.apiResponse.smelting.push({
+        id: recipe.id,
+        deprecated: recipe.deprecated,
+        inputItemId: recipe.input,
+        output: { itemId: recipe.output, quantity: 1 },
+        returnItems: [],
+        heatRequired: recipe.heatRequired
+      })
     }
   }
 
   protected doGetAPIResponse(): any {
-    return this.recipes
+    return this.apiResponse
   }
 
   getCraftingRecipe(guid: string): CraftingRecipe | null {
