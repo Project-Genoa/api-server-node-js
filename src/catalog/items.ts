@@ -34,6 +34,10 @@ class ItemsCatalog extends Catalog {
     return this.items
   }
 
+  getItem(guid: string): any {
+    return this.itemMap[guid]
+  }
+
   isItemStackable(guid: string): boolean {
     return (this.itemMap[guid] as { stacks: boolean }).stacks ?? false
   }

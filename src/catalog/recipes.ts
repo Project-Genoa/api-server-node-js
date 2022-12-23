@@ -8,9 +8,16 @@ export interface CraftingRecipe {
   duration: number
 }
 
+export interface SmeltingRecipe {
+  input: string,
+  output: string,
+  heatRequired: number
+}
+
 class RecipesCatalog extends Catalog {
   private recipes: { crafting: object[], smelting: object[] } = { crafting: [], smelting: [] }
   private craftingRecipesMap: { [index: string]: CraftingRecipe } = {}
+  private smeltingRecipesMap: { [index: string]: SmeltingRecipe } = {}
 
   protected async doLoadData(): Promise<void> {
     var crafting = []
@@ -29,6 +36,11 @@ class RecipesCatalog extends Catalog {
     for (const filePath of await getJSONFilesInDir(path.join('recipes', 'smelting'))) {
       const recipe = await readJSONFile(filePath)
       smelting.push(recipe)
+      this.smeltingRecipesMap[recipe.id] = {
+        input: recipe.inputItemId as string,
+        output: recipe.output.itemId as string,
+        heatRequired: recipe.heatRequired as number
+      }
     }
 
     this.recipes = {
@@ -43,6 +55,10 @@ class RecipesCatalog extends Catalog {
 
   getCraftingRecipe(guid: string): CraftingRecipe | null {
     return this.craftingRecipesMap[guid] ?? null
+  }
+
+  getSmeltingRecipe(guid: string): SmeltingRecipe | null {
+    return this.smeltingRecipesMap[guid] ?? null
   }
 }
 
