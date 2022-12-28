@@ -113,7 +113,7 @@ router.post('/api/v1.1/tappables/:tileId', (req, res) => {
       // TODO
       for (const name of testItems) {
         const guid = (ItemsCatalog.getAPIResponse().items as any[]).find(item => item.item.name == name.split('_')[0] && item.item.aux == (name.split('_')[1] ?? 0)).id
-        await player.inventory.addItemsToInventory(guid, 4)
+        await player.inventory.addItemsToInventory(guid, 4, true)
       }
 
       session.invalidateSequence('profile')

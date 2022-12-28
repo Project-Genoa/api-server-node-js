@@ -322,7 +322,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/collectItems', true, async (
     session.invalidateSequence('inventory')
     session.invalidateSequence('journal')
 
-    await player.inventory.addItemsToInventory(items.itemId, items.count)
+    await player.inventory.addItemsToInventory(items.itemId, items.count, true)
 
     return {
       rewards: {
@@ -358,7 +358,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/stop', true, async (req, res
     session.invalidateSequence('journal')
 
     if (items.output != null) {
-      await player.inventory.addItemsToInventory(items.output.itemId, items.output.count)
+      await player.inventory.addItemsToInventory(items.output.itemId, items.output.count, true)
     }
     for (const item of items.input) {
       if (Workshop.isStackableCraftingInputItem(item)) {
@@ -503,7 +503,7 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/collectItems', true, async (
     session.invalidateSequence('inventory')
     session.invalidateSequence('journal')
 
-    await player.inventory.addItemsToInventory(items.itemId, items.count)
+    await player.inventory.addItemsToInventory(items.itemId, items.count, true)
 
     return {
       rewards: {
@@ -539,7 +539,7 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/stop', true, async (req, res
     session.invalidateSequence('journal')
 
     if (items.output != null) {
-      await player.inventory.addItemsToInventory(items.output.itemId, items.output.count)
+      await player.inventory.addItemsToInventory(items.output.itemId, items.output.count, true)
     }
     if (Workshop.isStackableSmeltingInputItems(items.input)) {
       await player.inventory.addItemsToInventory(items.input.itemId, items.input.count)

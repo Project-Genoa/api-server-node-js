@@ -59,7 +59,7 @@ export default class Inventory {
     return { inventory: this.inventory, hotbar: this.hotbar }
   }
 
-  async addItemsToInventory(guid: string, count: number): Promise<void> {
+  async addItemsToInventory(guid: string, count: number, updateLastSeen: boolean = false): Promise<void> {
     assert(count == null || count > 0)
 
     const stackable = ItemsCatalog.isItemStackable(guid)
@@ -96,12 +96,13 @@ export default class Inventory {
       }
     }
 
-    // TODO: when should lastSeen be updated?
-    await this.player.transaction.set('player', this.player.userId, 'inventory.' + guid + '.lastSeen', now)
-    inventory[guid].lastSeen = now
+    if (updateLastSeen) {
+      await this.player.transaction.set('player', this.player.userId, 'inventory.' + guid + '.lastSeen', now)
+      inventory[guid].lastSeen = now
+    }
   }
 
-  async addExistingNonStackableItemToInventory(guid: string, instanceId: string, item: NonStackableItemInstance): Promise<boolean> {
+  async addExistingNonStackableItemToInventory(guid: string, instanceId: string, item: NonStackableItemInstance, updateLastSeen: boolean = false): Promise<boolean> {
     const now = new Date()
 
     const inventory = (await this.getInventory()).inventory
@@ -124,9 +125,10 @@ export default class Inventory {
     await this.player.transaction.set('player', this.player.userId, 'inventory.' + guid + '.instances.' + instanceId, item);
     (inventory[guid] as NonStackableInventoryEntry).instances[instanceId] = item
 
-    // TODO: when should lastSeen be updated?
-    await this.player.transaction.set('player', this.player.userId, 'inventory.' + guid + '.lastSeen', now)
-    inventory[guid].lastSeen = now
+    if (updateLastSeen) {
+      await this.player.transaction.set('player', this.player.userId, 'inventory.' + guid + '.lastSeen', now)
+      inventory[guid].lastSeen = now
+    }
 
     return true
   }
