@@ -1,3 +1,4 @@
+import assert from 'assert'
 import Player from '../player'
 import * as Inventory from './inventory'
 
@@ -85,6 +86,16 @@ export function isStackableCraftingInputItem(item: CraftingInputItem): item is S
 }
 
 export class CraftingSlot extends WorkshopSlot {
+  static getPriceToFinish(remainingTime: number): { price: number, changesAt: number } {
+    assert(remainingTime >= 0)
+
+    // TODO: the parameters for this should be in a data file
+    return {
+      price: Math.ceil(remainingTime / 10) * 5,
+      changesAt: Math.max((Math.ceil(remainingTime / 10) - 1) * 10, 0)
+    }
+  }
+
   private state: CraftingSlotState | null
 
   constructor(player: Player, slotIndex: number) {
@@ -367,6 +378,16 @@ function calculateDurationForRounds(requiredHeatPerRound: number, rounds: number
 }
 
 export class SmeltingSlot extends WorkshopSlot {
+  static getPriceToFinish(remainingTime: number): { price: number, changesAt: number } {
+    assert(remainingTime >= 0)
+
+    // TODO: the parameters for this should be in a data file
+    return {
+      price: Math.ceil(remainingTime / 10) * 5,
+      changesAt: Math.max((Math.ceil(remainingTime / 10) - 1) * 10, 0)
+    }
+  }
+
   private state: SmeltingSlotState | null
 
   constructor(player: Player, slotIndex: number) {

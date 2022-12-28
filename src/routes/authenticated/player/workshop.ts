@@ -411,11 +411,27 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, r
     }
   }
 
-  if (!await slot.finishNow()) {
+  const state = await slot.getState()
+  if (!Workshop.isActiveCraftingSlotState(state)) {
+    return
+  }
+  const remainingTime = Math.ceil((state.totalCompletionTime - new Date().getTime()) / 1000)
+  if (remainingTime < 0) {
+    return
+  }
+  const price = Workshop.CraftingSlot.getPriceToFinish(remainingTime)
+
+  if (req.body.expectedPurchasePrice < price.price) {
     return
   }
 
-  // TODO: validate price, deduct rubies
+  if (!await player.rubies.spendRubies(price.price)) {
+    return
+  }
+
+  if (!await slot.finishNow()) {
+    return
+  }
 
   const rubies = await player.rubies.getRubies()
   return {
@@ -425,11 +441,23 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, r
 })
 
 wrap(router, 'get', '/api/v1.1/crafting/finish/price', false, (req, res, session, player) => {
-  // TODO
+  const remainingTime = req.query.remainingTime
+  if (typeof remainingTime != 'string') {
+    return
+  }
+  const remainingTimeSeconds = remainingTime.split(':').map(part => parseInt(part)).reduce((time, part) => time * 60 + part, 0)
+  if (Number.isNaN(remainingTimeSeconds) || remainingTimeSeconds < 0) {
+    return
+  }
+
+  const price = Workshop.CraftingSlot.getPriceToFinish(remainingTimeSeconds)
+
+  const validTime = remainingTimeSeconds - price.changesAt
+
   return {
-    cost: 5,
+    cost: price.price,
     discount: 0,
-    validTime: req.query.remainingTime
+    validTime: '00:00:' + validTime
   }
 })
 
@@ -459,12 +487,14 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/unlock', true, async (req, r
     return
   }
 
+  if (!await player.rubies.spendRubies(lockState.unlockPrice)) {
+    return
+  }
+
   if (!await slot.unlock()) {
     return
   }
   session.invalidateSequence('crafting')
-
-  // TODO: deduct rubies
 
   return {}
 })
@@ -640,11 +670,27 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/finish', true, async (req, r
     }
   }
 
-  if (!await slot.finishNow()) {
+  const state = await slot.getState()
+  if (!Workshop.isActiveSmeltingSlotState(state)) {
+    return
+  }
+  const remainingTime = Math.ceil((state.endTime - new Date().getTime()) / 1000)
+  if (remainingTime < 0) {
+    return
+  }
+  const price = Workshop.SmeltingSlot.getPriceToFinish(remainingTime)
+
+  if (req.body.expectedPurchasePrice < price.price) {
     return
   }
 
-  // TODO: validate price, deduct rubies
+  if (!await player.rubies.spendRubies(price.price)) {
+    return
+  }
+
+  if (!await slot.finishNow()) {
+    return
+  }
 
   const rubies = await player.rubies.getRubies()
   return {
@@ -654,11 +700,23 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/finish', true, async (req, r
 })
 
 wrap(router, 'get', '/api/v1.1/smelting/finish/price', false, (req, res, session, player) => {
-  // TODO
+  const remainingTime = req.query.remainingTime
+  if (typeof remainingTime != 'string') {
+    return
+  }
+  const remainingTimeSeconds = remainingTime.split(':').map(part => parseInt(part)).reduce((time, part) => time * 60 + part, 0)
+  if (Number.isNaN(remainingTimeSeconds) || remainingTimeSeconds < 0) {
+    return
+  }
+
+  const price = Workshop.SmeltingSlot.getPriceToFinish(remainingTimeSeconds)
+
+  const validTime = remainingTimeSeconds - price.changesAt
+
   return {
-    cost: 5,
+    cost: price.price,
     discount: 0,
-    validTime: req.query.remainingTime
+    validTime: '00:00:' + validTime
   }
 })
 
@@ -688,12 +746,14 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/unlock', true, async (req, r
     return
   }
 
+  if (!await player.rubies.spendRubies(lockState.unlockPrice)) {
+    return
+  }
+
   if (!await slot.unlock()) {
     return
   }
   session.invalidateSequence('smelting')
-
-  // TODO: deduct rubies
 
   return {}
 })
