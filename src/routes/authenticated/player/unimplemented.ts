@@ -9,17 +9,6 @@ wrap(router, 'get', '/api/v1.1/player/tokens', false, (req, res, session, player
   }
 })
 
-wrap(router, 'get', '/api/v1.1/player/rubies', false, (req, res, session, player) => {
-  return 5
-})
-
-wrap(router, 'get', '/api/v1.1/player/splitRubies', false, (req, res, session, player) => {
-  return {
-    purchased: 5,
-    earned: 0
-  }
-})
-
 wrap(router, 'get', '/api/v1.1/player/profile/:userId', false, (req, res, session, player) => {
   // TODO: must we enforce only being able to look up your own profile?
   return {

@@ -402,10 +402,10 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, r
 
   // TODO: validate price, deduct rubies
 
-  // TODO: return new rubies amount (same format as splitRubies)
+  const rubies = await player.rubies.getRubies()
   return {
-    purchased: 5,
-    earned: 0
+    purchased: rubies.purchased,
+    earned: rubies.earned
   }
 })
 
@@ -591,10 +591,10 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/finish', true, async (req, r
 
   // TODO: validate price, deduct rubies
 
-  // TODO: return new rubies amount (same format as splitRubies)
+  const rubies = await player.rubies.getRubies()
   return {
-    purchased: 5,
-    earned: 0
+    purchased: rubies.purchased,
+    earned: rubies.earned
   }
 })
 
