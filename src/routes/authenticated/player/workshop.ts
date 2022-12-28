@@ -13,44 +13,49 @@ import Player from '../../../model/player'
 import * as Inventory from '../../../model/player/inventory'
 import * as Workshop from '../../../model/player/workshop'
 
-function craftingSlotStateToAPIResponse(session: ModifiableSession, state: Workshop.CraftingSlotState) {
-  if (Workshop.isActiveCraftingSlotState(state)) {
-    return {
-      sessionId: state.sessionId,
-      recipeId: state.recipeId,
-      output: { itemId: state.output.itemId, quantity: state.output.count },
-      escrow: state.input == null ? [] : state.input.map(item => Workshop.isStackableCraftingInputItem(item) ? { itemId: item.itemId, quantity: item.count, itemInstanceIds: null } : { itemId: item.itemId, quantity: item.instances.length, instanceIds: item.instances.map(instance => instance.instanceId) }), // TODO: are we supposed to include the item instance info (e.g. health) somewhere?
-      completed: state.completedRounds,
-      available: state.availableRounds,
-      total: state.totalRounds,
-      nextCompletionUtc: state.nextCompletionTime != null ? new Date(state.nextCompletionTime) : null,
-      totalCompletionUtc: new Date(state.totalCompletionTime),
-      state: state.nextCompletionTime != null ? 'Active' : 'Completed',
-      boostState: null,
-      unlockPrice: null,
-      streamVersion: session.getSequenceNumber('crafting')
-    }
+async function craftingSlotToAPIResponse(session: ModifiableSession, slot: Workshop.CraftingSlot) {
+  const response: any = {
+    sessionId: null,
+    recipeId: null,
+    output: null,
+    escrow: [],
+    completed: 0,
+    available: 0,
+    total: 0,
+    nextCompletionUtc: null,
+    totalCompletionUtc: null,
+    state: 'Empty',
+    boostState: null,
+    unlockPrice: null,
+    streamVersion: session.getSequenceNumber('crafting')
+  }
+
+  const lockState = await slot.getLockState()
+  if (lockState.locked) {
+    response.state = 'Locked'
+    response.unlockPrice = { cost: lockState.unlockPrice, discount: 0 }
   }
   else {
-    return {
-      sessionId: null,
-      recipeId: null,
-      output: null,
-      escrow: [],
-      completed: 0,
-      available: 0,
-      total: 0,
-      nextCompletionUtc: null,
-      totalCompletionUtc: null,
-      state: 'Empty',
-      boostState: null,
-      unlockPrice: null,
-      streamVersion: session.getSequenceNumber('crafting')
+    const state = await slot.getState()
+
+    if (Workshop.isActiveCraftingSlotState(state)) {
+      response.sessionId = state.sessionId
+      response.recipeId = state.recipeId
+      response.output = { itemId: state.output.itemId, quantity: state.output.count }
+      response.escrow = state.input == null ? [] : state.input.map(item => Workshop.isStackableCraftingInputItem(item) ? { itemId: item.itemId, quantity: item.count, itemInstanceIds: null } : { itemId: item.itemId, quantity: item.instances.length, instanceIds: item.instances.map(instance => instance.instanceId) }) // TODO: are we supposed to include the item instance info (e.g. health) somewhere?
+      response.completed = state.completedRounds
+      response.available = state.availableRounds
+      response.total = state.totalRounds
+      response.nextCompletionUtc = state.nextCompletionTime != null ? new Date(state.nextCompletionTime) : null
+      response.totalCompletionUtc = new Date(state.totalCompletionTime)
+      response.state = state.nextCompletionTime != null ? 'Active' : 'Completed'
     }
   }
+
+  return response
 }
 
-function smeltingSlotStateToAPIResponse(session: ModifiableSession, state: Workshop.SmeltingSlotState) {
+async function smeltingSlotToAPIResponse(session: ModifiableSession, slot: Workshop.SmeltingSlot) {
   const response: any = {
     fuel: null,
     burning: null,
@@ -69,60 +74,66 @@ function smeltingSlotStateToAPIResponse(session: ModifiableSession, state: Works
     streamVersion: session.getSequenceNumber('smelting')
   }
 
-  if (Workshop.isActiveSmeltingSlotState(state) && state.completedRounds < state.totalRounds) {
-    response.burning = {
-      burnStartTime: new Date(state.heat.burnStartTime),
-      burnsUntil: new Date(state.heat.burnEndTime),
-      fuel: {
-        burnRate: {
-          burnTime: state.heat.fuel.totalBurnDuration,
-          heatPerSecond: state.heat.fuel.heatPerSecond
-        },
-        itemId: state.heat.fuel.item.itemId,
-        quantity: Workshop.isStackableSmeltingInputItems(state.heat.fuel.item) ? state.heat.fuel.item.count : state.heat.fuel.item.instances.length,
-        itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.heat.fuel.item) ? null : state.heat.fuel.item.instances.map(instance => instance.instanceId)
-      }
-    }
+  const lockState = await slot.getLockState()
+  if (lockState.locked) {
+    response.state = 'Locked'
+    response.unlockPrice = { cost: lockState.unlockPrice, discount: 0 }
   }
-  else if (state.heatCarriedOver != null) {
-    response.burning = {
-      remainingBurnTime: '00:00:' + (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed),
-      heatDepleted: state.heatCarriedOver.fuel.heatPerSecond * state.heatCarriedOver.secondsUsed,
-      fuel: {
-        burnRate: {
-          burnTime: state.heatCarriedOver.fuel.totalBurnDuration,
-          heatPerSecond: state.heatCarriedOver.fuel.heatPerSecond
-        },
-        itemId: state.heatCarriedOver.fuel.item.itemId,
-        quantity: Workshop.isStackableSmeltingInputItems(state.heatCarriedOver.fuel.item) ? state.heatCarriedOver.fuel.item.count : state.heatCarriedOver.fuel.item.instances.length,
-        itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.heatCarriedOver.fuel.item) ? null : state.heatCarriedOver.fuel.item.instances.map(instance => instance.instanceId)
-      }
-    }
-  }
+  else {
+    const state = await slot.getState()
 
-  if (Workshop.isActiveSmeltingSlotState(state)) {
-    response.fuel = state.fuel != null ? {
-      burnRate: {
-        burnTime: state.fuel.totalBurnDuration,
-        heatPerSecond: state.fuel.heatPerSecond
-      },
-      itemId: state.fuel.item.itemId,
-      quantity: Workshop.isStackableSmeltingInputItems(state.fuel.item) ? state.fuel.item.count : state.fuel.item.instances.length,
-      itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.fuel.item) ? null : state.fuel.item.instances.map(instance => instance.instanceId)
-    } : null
-    response.sessionId = state.sessionId
-    response.recipeId = state.recipeId
-    response.output = { itemId: state.output, quantity: 1 }
-    response.escrow = state.input == null ? [] : [Workshop.isStackableSmeltingInputItems(state.input) ? { itemId: state.input.itemId, quantity: state.input.count, itemInstanceIds: null } : { itemId: state.input.itemId, quantity: state.input.instances.length, instanceIds: state.input.instances.map(instance => instance.instanceId) }]
-    response.completed = state.completedRounds
-    response.available = state.availableRounds
-    response.total = state.totalRounds
-    response.nextCompletionUtc = state.completedRounds < state.totalRounds ? new Date(state.nextCompletionTime) : null
-    response.totalCompletionUtc = new Date(state.endTime)
-    response.state = state.completedRounds == state.totalRounds ? 'Completed' : 'Active'
-    response.boostState = null
-    response.unlockPrice = null
-    response.streamVersion = session.getSequenceNumber('smelting')
+    if (Workshop.isActiveSmeltingSlotState(state) && state.completedRounds < state.totalRounds) {
+      response.burning = {
+        burnStartTime: new Date(state.heat.burnStartTime),
+        burnsUntil: new Date(state.heat.burnEndTime),
+        fuel: {
+          burnRate: {
+            burnTime: state.heat.fuel.totalBurnDuration,
+            heatPerSecond: state.heat.fuel.heatPerSecond
+          },
+          itemId: state.heat.fuel.item.itemId,
+          quantity: Workshop.isStackableSmeltingInputItems(state.heat.fuel.item) ? state.heat.fuel.item.count : state.heat.fuel.item.instances.length,
+          itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.heat.fuel.item) ? null : state.heat.fuel.item.instances.map(instance => instance.instanceId)
+        }
+      }
+    }
+    else if (state.heatCarriedOver != null) {
+      response.burning = {
+        remainingBurnTime: '00:00:' + (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed),
+        heatDepleted: state.heatCarriedOver.fuel.heatPerSecond * state.heatCarriedOver.secondsUsed,
+        fuel: {
+          burnRate: {
+            burnTime: state.heatCarriedOver.fuel.totalBurnDuration,
+            heatPerSecond: state.heatCarriedOver.fuel.heatPerSecond
+          },
+          itemId: state.heatCarriedOver.fuel.item.itemId,
+          quantity: Workshop.isStackableSmeltingInputItems(state.heatCarriedOver.fuel.item) ? state.heatCarriedOver.fuel.item.count : state.heatCarriedOver.fuel.item.instances.length,
+          itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.heatCarriedOver.fuel.item) ? null : state.heatCarriedOver.fuel.item.instances.map(instance => instance.instanceId)
+        }
+      }
+    }
+
+    if (Workshop.isActiveSmeltingSlotState(state)) {
+      response.fuel = state.fuel != null ? {
+        burnRate: {
+          burnTime: state.fuel.totalBurnDuration,
+          heatPerSecond: state.fuel.heatPerSecond
+        },
+        itemId: state.fuel.item.itemId,
+        quantity: Workshop.isStackableSmeltingInputItems(state.fuel.item) ? state.fuel.item.count : state.fuel.item.instances.length,
+        itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.fuel.item) ? null : state.fuel.item.instances.map(instance => instance.instanceId)
+      } : null
+      response.sessionId = state.sessionId
+      response.recipeId = state.recipeId
+      response.output = { itemId: state.output, quantity: 1 }
+      response.escrow = state.input == null ? [] : [Workshop.isStackableSmeltingInputItems(state.input) ? { itemId: state.input.itemId, quantity: state.input.count, itemInstanceIds: null } : { itemId: state.input.itemId, quantity: state.input.instances.length, instanceIds: state.input.instances.map(instance => instance.instanceId) }]
+      response.completed = state.completedRounds
+      response.available = state.availableRounds
+      response.total = state.totalRounds
+      response.nextCompletionUtc = state.completedRounds < state.totalRounds ? new Date(state.nextCompletionTime) : null
+      response.totalCompletionUtc = new Date(state.endTime)
+      response.state = state.completedRounds == state.totalRounds ? 'Completed' : 'Active'
+    }
   }
 
   return response
@@ -227,10 +238,10 @@ wrap(router, 'get', '/api/v1.1/player/utilityBlocks', false, async (req, res, se
   }
 
   const craftingSlots = await Promise.all(player.workshop.craftingSlots.map(async slot => {
-    return craftingSlotStateToAPIResponse(session, await slot.getState())
+    return await craftingSlotToAPIResponse(session, slot)
   }))
   const smeltingSlots = await Promise.all(player.workshop.smeltingSlots.map(async slot => {
-    return smeltingSlotStateToAPIResponse(session, await slot.getState())
+    return await smeltingSlotToAPIResponse(session, slot)
   }))
 
   return {
@@ -258,7 +269,7 @@ wrap(router, 'get', '/api/v1.1/crafting/:slotIndex', true, async (req, res, sess
     session.invalidateSequence('crafting')
   }
 
-  return craftingSlotStateToAPIResponse(session, await slot.getState())
+  return await craftingSlotToAPIResponse(session, slot)
 })
 
 wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/start', true, async (req, res, session, player) => {
@@ -372,7 +383,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/stop', true, async (req, res
     }
   }
 
-  return craftingSlotStateToAPIResponse(session, await slot.getState())
+  return await craftingSlotToAPIResponse(session, slot)
 })
 
 wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, res, session, player) => {
@@ -418,6 +429,42 @@ wrap(router, 'get', '/api/v1.1/crafting/finish/price', false, (req, res, session
   }
 })
 
+wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/unlock', true, async (req, res, session, player) => {
+  const slotIndex = parseInt(req.params.slotIndex)
+  if (Number.isNaN(slotIndex) || slotIndex < 1 || slotIndex > player.workshop.craftingSlots.length) {
+    return
+  }
+  const slot = player.workshop.craftingSlots[slotIndex - 1]
+
+  try {
+    assert(typeof req.body == 'object')
+    assert(typeof req.body.expectedPurchasePrice == 'number')
+    assert(req.body.expectedPurchasePrice > 0)
+  }
+  catch (err) {
+    if (err instanceof AssertionError) {
+      return
+    }
+    else {
+      throw err
+    }
+  }
+
+  const lockState = await slot.getLockState()
+  if (!lockState.locked || req.body.expectedPurchasePrice != lockState.unlockPrice) {
+    return
+  }
+
+  if (!await slot.unlock()) {
+    return
+  }
+  session.invalidateSequence('crafting')
+
+  // TODO: deduct rubies
+
+  return {}
+})
+
 wrap(router, 'get', '/api/v1.1/smelting/:slotIndex', true, async (req, res, session, player) => {
   const slotIndex = parseInt(req.params.slotIndex)
   if (Number.isNaN(slotIndex) || slotIndex < 1 || slotIndex > player.workshop.smeltingSlots.length) {
@@ -429,7 +476,7 @@ wrap(router, 'get', '/api/v1.1/smelting/:slotIndex', true, async (req, res, sess
     session.invalidateSequence('smelting')
   }
 
-  return smeltingSlotStateToAPIResponse(session, await slot.getState())
+  return await smeltingSlotToAPIResponse(session, slot)
 })
 
 wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/start', true, async (req, res, session, player) => {
@@ -561,7 +608,7 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/stop', true, async (req, res
     }
   }
 
-  return smeltingSlotStateToAPIResponse(session, await slot.getState())
+  return await smeltingSlotToAPIResponse(session, slot)
 })
 
 wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/finish', true, async (req, res, session, player) => {
@@ -605,6 +652,42 @@ wrap(router, 'get', '/api/v1.1/smelting/finish/price', false, (req, res, session
     discount: 0,
     validTime: req.query.remainingTime
   }
+})
+
+wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/unlock', true, async (req, res, session, player) => {
+  const slotIndex = parseInt(req.params.slotIndex)
+  if (Number.isNaN(slotIndex) || slotIndex < 1 || slotIndex > player.workshop.smeltingSlots.length) {
+    return
+  }
+  const slot = player.workshop.smeltingSlots[slotIndex - 1]
+
+  try {
+    assert(typeof req.body == 'object')
+    assert(typeof req.body.expectedPurchasePrice == 'number')
+    assert(req.body.expectedPurchasePrice > 0)
+  }
+  catch (err) {
+    if (err instanceof AssertionError) {
+      return
+    }
+    else {
+      throw err
+    }
+  }
+
+  const lockState = await slot.getLockState()
+  if (!lockState.locked || req.body.expectedPurchasePrice != lockState.unlockPrice) {
+    return
+  }
+
+  if (!await slot.unlock()) {
+    return
+  }
+  session.invalidateSequence('smelting')
+
+  // TODO: deduct rubies
+
+  return {}
 })
 
 export = router

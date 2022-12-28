@@ -20,13 +20,42 @@ export default class Workshop {
   }
 }
 
+export type WorkshopSlotType = 'crafting' | 'smelting'
+
 export class WorkshopSlot {
   readonly player: Player
   readonly slotIndex: number
+  readonly type: WorkshopSlotType
 
-  constructor(player: Player, slotIndex: number) {
+  private locked: boolean | null
+
+  constructor(player: Player, slotIndex: number, type: WorkshopSlotType) {
     this.player = player
     this.slotIndex = slotIndex
+    this.type = type
+
+    this.locked = null
+  }
+
+  async getLockState(): Promise<{ locked: true, unlockPrice: number } | { locked: false }> {
+    if (this.locked == null) {
+      this.locked = await this.player.transaction.get('player', this.player.userId, 'workshop.lock.' + this.type + '.' + this.slotIndex) as boolean | null ?? true
+    }
+    return { locked: this.locked, unlockPrice: 5 }  // TODO: unlock price should be in a data file somewhere
+  }
+
+  async unlock(): Promise<boolean> {
+    const locked = await this.getLockState()
+    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.lock.' + this.type + '.' + this.slotIndex, true)
+
+    if (!locked) {
+      return false
+    }
+
+    await this.player.transaction.set('player', this.player.userId, 'workshop.lock.' + this.type + '.' + this.slotIndex, false)
+    this.locked = false
+
+    return true
   }
 }
 
@@ -59,7 +88,7 @@ export class CraftingSlot extends WorkshopSlot {
   private state: CraftingSlotState | null
 
   constructor(player: Player, slotIndex: number) {
-    super(player, slotIndex)
+    super(player, slotIndex, 'crafting')
 
     this.state = null
   }
@@ -341,7 +370,7 @@ export class SmeltingSlot extends WorkshopSlot {
   private state: SmeltingSlotState | null
 
   constructor(player: Player, slotIndex: number) {
-    super(player, slotIndex)
+    super(player, slotIndex, 'smelting')
 
     this.state = null
   }
