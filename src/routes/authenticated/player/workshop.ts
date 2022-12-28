@@ -299,6 +299,10 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/start', true, async (req, re
     }
   }
 
+  if ((await slot.getLockState()).locked) {
+    return
+  }
+
   const ingredients: Workshop.CraftingInputItem[] = []
   for (const ingredient of req.body.ingredients as RequestItem[]) {
     const collected = await collectRequestItemFromInventory(player, ingredient)
@@ -502,6 +506,10 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/start', true, async (req, re
     else {
       throw err
     }
+  }
+
+  if ((await slot.getLockState()).locked) {
+    return
   }
 
   const collectedInput = await collectRequestItemFromInventory(player, req.body.input as RequestItem)
