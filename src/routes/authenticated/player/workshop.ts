@@ -1,4 +1,4 @@
-import assert, { AssertionError } from 'assert'
+import Runtypes from 'runtypes'
 import Express from 'express'
 const router = Express.Router()
 import { wrap } from './wrap'
@@ -139,40 +139,22 @@ async function smeltingSlotToAPIResponse(session: ModifiableSession, slot: Works
   return response
 }
 
-interface RequestItem {
-  itemId: string,
-  quantity: number,
-  itemInstanceIds: [string] | null
-}
+const RequestItem = Runtypes.Record({
+  itemId: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+  quantity: Runtypes.Number.withConstraint(value => Number.isInteger(value)).withConstraint(value => value >= 0),
+  itemInstanceIds: Runtypes.Union(Runtypes.Array(Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value))), Runtypes.Null)
+}).withConstraint(value => value.itemInstanceIds == null || value.itemInstanceIds.length == value.quantity)
 
-function validateRequestItem(item: any, allowZeroQuantity: boolean = false): asserts item is RequestItem {
-  assert(typeof item == 'object')
-  assert(GUIDUtils.validateGUID(item.itemId))
-  assert(typeof item.quantity == 'number')
-  if (allowZeroQuantity) {
-    assert(item.quantity >= 0)
-  }
-  else {
-    assert(item.quantity > 0)
-  }
-  if (ItemsCatalog.isItemStackable(item.itemId)) {
-    assert(item.itemInstanceIds == null)
-  }
-  else {
-    assert(typeof item.itemInstanceIds == 'object' && Array.isArray(item.itemInstanceIds))
-    assert(item.itemInstanceIds.length == item.quantity)
-    item.itemInstanceIds.forEach((itemInstanceId: unknown) => {
-      assert(GUIDUtils.validateGUID(itemInstanceId))
-    })
-  }
-}
-
-async function collectRequestItemFromInventory(player: Player, item: RequestItem, maxCount: number | null = null): Promise<{ itemId: string; count: number; instances: { instanceId: string; item: Inventory.NonStackableItemInstance }[] | null } | null> {
+async function collectRequestItemFromInventory(player: Player, item: Runtypes.Static<typeof RequestItem>, maxCount: number | null = null): Promise<{ itemId: string; count: number; instances: { instanceId: string; item: Inventory.NonStackableItemInstance }[] | null } | null> {
   const inventory = await player.inventory.getInventory()
 
-  const itemId = item.itemId as string
+  const itemId = item.itemId
   if (ItemsCatalog.isItemStackable(itemId)) {
-    const targetCount = maxCount != null ? Math.min(item.quantity as number, maxCount) : (item.quantity as number)
+    if (item.itemInstanceIds != null) {
+      return null
+    }
+
+    const targetCount = maxCount != null ? Math.min(item.quantity, maxCount) : (item.quantity)
     var collectedCount = 0
 
     for (var hotbarSlotIndex = 0; hotbarSlotIndex < inventory.hotbar.length; hotbarSlotIndex++) {
@@ -195,8 +177,12 @@ async function collectRequestItemFromInventory(player: Player, item: RequestItem
     return { itemId: itemId, count: targetCount, instances: null }
   }
   else {
+    if (item.itemInstanceIds == null) {
+      return null
+    }
+
     const instances: { instanceId: string, item: Inventory.NonStackableItemInstance }[] = []
-    for (const instanceId of item.itemInstanceIds as string[]) {
+    for (const instanceId of item.itemInstanceIds) {
       if (maxCount != null && instances.length == maxCount) {
         break
       }
@@ -224,6 +210,10 @@ async function collectRequestItemFromInventory(player: Player, item: RequestItem
     return { itemId: itemId, count: instances.length, instances: instances }
   }
 }
+
+const PurchaseRequest = Runtypes.Record({
+  expectedPurchasePrice: Runtypes.Number.withConstraint(value => Number.isInteger(value)).withConstraint(value => value > 0)
+})
 
 wrap(router, 'get', '/api/v1.1/player/utilityBlocks', false, async (req, res, session, player) => {
   for (const slot of player.workshop.craftingSlots) {
@@ -272,31 +262,22 @@ wrap(router, 'get', '/api/v1.1/crafting/:slotIndex', true, async (req, res, sess
   return await craftingSlotToAPIResponse(session, slot)
 })
 
+const CraftingStartRequest = Runtypes.Record({
+  sessionId: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+  recipeId: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+  multiplier: Runtypes.Number.withConstraint(value => Number.isInteger(value)).withConstraint(value => value > 0),
+  ingredients: Runtypes.Array(RequestItem.withConstraint(value => value.quantity > 0))
+})
+
 wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/start', true, async (req, res, session, player) => {
   const slotIndex = parseInt(req.params.slotIndex)
   if (Number.isNaN(slotIndex) || slotIndex < 1 || slotIndex > player.workshop.craftingSlots.length) {
     return
   }
   const slot = player.workshop.craftingSlots[slotIndex - 1]
-
-  try {
-    assert(typeof req.body == 'object')
-    assert(GUIDUtils.validateGUID(req.body.sessionId))
-    assert(GUIDUtils.validateGUID(req.body.recipeId))
-    assert(typeof req.body.multiplier == 'number')
-    assert(req.body.multiplier > 0)
-    assert(typeof req.body.ingredients == 'object' && Array.isArray(req.body.ingredients))
-    for (const ingredient of req.body.ingredients) {
-      validateRequestItem(ingredient)
-    }
-  }
-  catch (err) {
-    if (err instanceof AssertionError) {
-      return
-    }
-    else {
-      throw err
-    }
+  const request = CraftingStartRequest.validate(req.body)
+  if (!request.success) {
+    return
   }
 
   if ((await slot.getLockState()).locked) {
@@ -304,7 +285,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/start', true, async (req, re
   }
 
   const ingredients: Workshop.CraftingInputItem[] = []
-  for (const ingredient of req.body.ingredients as RequestItem[]) {
+  for (const ingredient of request.value.ingredients) {
     const collected = await collectRequestItemFromInventory(player, ingredient)
     if (collected == null) {
       return
@@ -314,7 +295,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/start', true, async (req, re
     }
   }
 
-  if (await slot.start(req.body.sessionId, req.body.recipeId, req.body.multiplier, ingredients)) {
+  if (await slot.start(request.value.sessionId, request.value.recipeId, request.value.multiplier, ingredients)) {
     session.invalidateSequence('crafting')
     session.invalidateSequence('inventory')
     return {}
@@ -396,19 +377,9 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, r
     return
   }
   const slot = player.workshop.craftingSlots[slotIndex - 1]
-
-  try {
-    assert(typeof req.body == 'object')
-    assert(typeof req.body.expectedPurchasePrice == 'number')
-    assert(req.body.expectedPurchasePrice > 0)
-  }
-  catch (err) {
-    if (err instanceof AssertionError) {
-      return
-    }
-    else {
-      throw err
-    }
+  const request = PurchaseRequest.validate(req.body)
+  if (!request.success) {
+    return
   }
 
   const state = await slot.getState()
@@ -421,7 +392,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, r
   }
   const price = Workshop.CraftingSlot.getPriceToFinish(remainingTime)
 
-  if (req.body.expectedPurchasePrice < price.price) {
+  if (request.value.expectedPurchasePrice < price.price) {
     return
   }
 
@@ -467,23 +438,13 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/unlock', true, async (req, r
     return
   }
   const slot = player.workshop.craftingSlots[slotIndex - 1]
-
-  try {
-    assert(typeof req.body == 'object')
-    assert(typeof req.body.expectedPurchasePrice == 'number')
-    assert(req.body.expectedPurchasePrice > 0)
-  }
-  catch (err) {
-    if (err instanceof AssertionError) {
-      return
-    }
-    else {
-      throw err
-    }
+  const request = PurchaseRequest.validate(req.body)
+  if (!request.success) {
+    return
   }
 
   const lockState = await slot.getLockState()
-  if (!lockState.locked || req.body.expectedPurchasePrice != lockState.unlockPrice) {
+  if (!lockState.locked || request.value.expectedPurchasePrice != lockState.unlockPrice) {
     return
   }
 
@@ -513,59 +474,59 @@ wrap(router, 'get', '/api/v1.1/smelting/:slotIndex', true, async (req, res, sess
   return await smeltingSlotToAPIResponse(session, slot)
 })
 
+const SmeltingStartRequest = Runtypes.Record({
+  sessionId: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+  recipeId: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+  multiplier: Runtypes.Number.withConstraint(value => Number.isInteger(value)).withConstraint(value => value > 0),
+  input: RequestItem.withConstraint(value => value.quantity > 0),
+  fuel: Runtypes.Optional(Runtypes.Union(RequestItem, Runtypes.Nullish))
+})
+
 wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/start', true, async (req, res, session, player) => {
   const slotIndex = parseInt(req.params.slotIndex)
   if (Number.isNaN(slotIndex) || slotIndex < 1 || slotIndex > player.workshop.smeltingSlots.length) {
     return
   }
   const slot = player.workshop.smeltingSlots[slotIndex - 1]
-
-  try {
-    assert(typeof req.body == 'object')
-    assert(GUIDUtils.validateGUID(req.body.sessionId))
-    assert(GUIDUtils.validateGUID(req.body.recipeId))
-    assert(typeof req.body.multiplier == 'number')
-    assert(req.body.multiplier > 0)
-    validateRequestItem(req.body.input)
-    validateRequestItem(req.body.fuel, true)
-  }
-  catch (err) {
-    if (err instanceof AssertionError) {
-      return
-    }
-    else {
-      throw err
-    }
+  const request = SmeltingStartRequest.validate(req.body)
+  if (!request.success) {
+    return
   }
 
   if ((await slot.getLockState()).locked) {
     return
   }
 
-  const collectedInput = await collectRequestItemFromInventory(player, req.body.input as RequestItem)
+  const collectedInput = await collectRequestItemFromInventory(player, request.value.input)
   if (collectedInput == null) {
     return
   }
   const input: Workshop.SmeltingInputItems = collectedInput.instances != null ? { itemId: collectedInput.itemId, instances: collectedInput.instances } : { itemId: collectedInput.itemId, count: collectedInput.count }
 
-  const recipe = RecipesCatalog.getSmeltingRecipe(req.body.recipeId)
-  if (recipe == null) {
-    return
+  var fuel: Workshop.SmeltingInputItems | null = null
+  if (request.value.fuel != null && request.value.fuel.quantity > 0) {
+    const recipe = RecipesCatalog.getSmeltingRecipe(request.value.recipeId)
+    if (recipe == null) {
+      return
+    }
+    const fuelItem = ItemsCatalog.getItem(request.value.fuel.itemId)
+    if (fuelItem == null) {
+      return
+    }
+    await slot.updateState()
+    const state = await slot.getState()
+    const requiredFuelCount = Math.ceil((recipe.heatRequired * request.value.multiplier - (state.heatCarriedOver != null ? (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed) * state.heatCarriedOver.fuel.heatPerSecond : 0)) / (fuelItem.burnRate.burnTime * fuelItem.burnRate.heatPerSecond))
+    const collectedFuel = await collectRequestItemFromInventory(player, request.value.fuel, requiredFuelCount)
+    if (collectedFuel == null) {
+      return
+    }
+    fuel = collectedFuel.instances != null ? { itemId: collectedFuel.itemId, instances: collectedFuel.instances } : { itemId: collectedFuel.itemId, count: collectedFuel.count }
   }
-  const fuelItem = ItemsCatalog.getItem(req.body.fuel.itemId)
-  if (fuelItem == null) {
-    return
+  else {
+    fuel = null
   }
-  await slot.updateState()
-  const state = await slot.getState()
-  const requiredFuelCount = Math.ceil((recipe.heatRequired * req.body.multiplier - (state.heatCarriedOver != null ? (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed) * state.heatCarriedOver.fuel.heatPerSecond : 0)) / (fuelItem.burnRate.burnTime * fuelItem.burnRate.heatPerSecond))
-  const collectedFuel = (req.body.fuel as RequestItem).quantity > 0 ? await collectRequestItemFromInventory(player, req.body.fuel as RequestItem, requiredFuelCount) : null
-  if ((req.body.fuel as RequestItem).quantity > 0 && collectedFuel == null) {
-    return
-  }
-  const fuel: Workshop.SmeltingInputItems | null = collectedFuel != null ? (collectedFuel.instances != null ? { itemId: collectedFuel.itemId, instances: collectedFuel.instances } : { itemId: collectedFuel.itemId, count: collectedFuel.count }) : null
 
-  if (await slot.start(req.body.sessionId, req.body.recipeId, req.body.multiplier, input, fuel)) {
+  if (await slot.start(request.value.sessionId, request.value.recipeId, request.value.multiplier, input, fuel)) {
     session.invalidateSequence('smelting')
     session.invalidateSequence('inventory')
     return {}
@@ -655,19 +616,9 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/finish', true, async (req, r
     return
   }
   const slot = player.workshop.smeltingSlots[slotIndex - 1]
-
-  try {
-    assert(typeof req.body == 'object')
-    assert(typeof req.body.expectedPurchasePrice == 'number')
-    assert(req.body.expectedPurchasePrice > 0)
-  }
-  catch (err) {
-    if (err instanceof AssertionError) {
-      return
-    }
-    else {
-      throw err
-    }
+  const request = PurchaseRequest.validate(req.body)
+  if (!request.success) {
+    return
   }
 
   const state = await slot.getState()
@@ -680,7 +631,7 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/finish', true, async (req, r
   }
   const price = Workshop.SmeltingSlot.getPriceToFinish(remainingTime)
 
-  if (req.body.expectedPurchasePrice < price.price) {
+  if (request.value.expectedPurchasePrice < price.price) {
     return
   }
 
@@ -726,23 +677,13 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/unlock', true, async (req, r
     return
   }
   const slot = player.workshop.smeltingSlots[slotIndex - 1]
-
-  try {
-    assert(typeof req.body == 'object')
-    assert(typeof req.body.expectedPurchasePrice == 'number')
-    assert(req.body.expectedPurchasePrice > 0)
-  }
-  catch (err) {
-    if (err instanceof AssertionError) {
-      return
-    }
-    else {
-      throw err
-    }
+  const request = PurchaseRequest.validate(req.body)
+  if (!request.success) {
+    return
   }
 
   const lockState = await slot.getLockState()
-  if (!lockState.locked || req.body.expectedPurchasePrice != lockState.unlockPrice) {
+  if (!lockState.locked || request.value.expectedPurchasePrice != lockState.unlockPrice) {
     return
   }
 
