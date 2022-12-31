@@ -1,4 +1,4 @@
-import Runtypes from 'runtypes'
+import * as Runtypes from 'runtypes'
 import Express from 'express'
 const router = Express.Router()
 import { wrap } from './wrap'
