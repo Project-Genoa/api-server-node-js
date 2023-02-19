@@ -1,4 +1,4 @@
-import assert, { AssertionError } from 'assert'
+import * as Runtypes from 'runtypes'
 import Express from 'express'
 const router = Express.Router()
 import { wrap } from './wrap'
@@ -51,6 +51,20 @@ wrap(router, 'get', '/api/v1.1/inventory/survival', false, async (req, res, sess
   }
 })
 
+const HotbarRequest = Runtypes.Array(Runtypes.Union(
+  Runtypes.Record({
+    id: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+    count: Runtypes.Number.withConstraint(value => Number.isInteger(value)).withConstraint(value => value > 0 && value <= 64),
+    instanceId: Runtypes.Optional(Runtypes.Nullish),
+  }),
+  Runtypes.Record({
+    id: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value)),
+    count: Runtypes.Number.withConstraint(value => Number.isInteger(value)).withConstraint(value => value == 1),
+    instanceId: Runtypes.String.withConstraint(value => GUIDUtils.validateGUID(value))
+  }),
+  Runtypes.Null
+))
+
 wrap(router, 'put', '/api/v1.1/inventory/survival/hotbar', null, async (req, res, session, player) => {
   async function removeExistingItem(slotIndex: number): Promise<boolean> {
     const item = await player.inventory.takeItemsFromHotbar(slotIndex)
@@ -95,43 +109,21 @@ wrap(router, 'put', '/api/v1.1/inventory/survival/hotbar', null, async (req, res
   }
 
   const hotbar = (await player.inventory.getInventory()).hotbar
+  const request = HotbarRequest.withConstraint(value => value.length == hotbar.length).validate(req.body)
+  if (!request.success) {
+    return
+  }
 
   const actionList: ({ action: 'remove', slotIndex: number } | { action: 'put' | 'take', slotIndex: number, guid: string, count: number } | { action: 'put', slotIndex: number, guid: string, instanceId: string })[] = []
   for (var slotIndex = 0; slotIndex < hotbar.length; slotIndex++) {
-    const requestSlot = req.body[slotIndex]
-    var requestStackable: boolean = false
-    if (requestSlot === undefined) {
-      return
-    }
+    const requestSlot = request.value[slotIndex]
+    const requestStackable = requestSlot?.instanceId == null
     if (requestSlot != null) {
-      try {
-        assert(typeof requestSlot == 'object')
-        assert('id' in requestSlot)
-        assert('count' in requestSlot)
-        assert('instanceId' in requestSlot)
-
-        assert(GUIDUtils.validateGUID(requestSlot.id))
-        assert(typeof requestSlot.count == 'number')
-        assert(requestSlot.instanceId == null || GUIDUtils.validateGUID(requestSlot.id))
-
-        if (ItemsCatalog.isItemStackable(requestSlot.id)) {
-          assert(requestSlot.count > 0 && requestSlot.count <= 64)
-          assert(requestSlot.instanceId == null)
-          requestStackable = true
-        }
-        else {
-          assert(requestSlot.count == 1)
-          assert(requestSlot.instanceId != null)
-          requestStackable = false
-        }
+      if (requestStackable && !ItemsCatalog.isItemStackable(requestSlot.id)) {
+        return
       }
-      catch (err) {
-        if (err instanceof AssertionError) {
-          return
-        }
-        else {
-          throw err
-        }
+      else if (!requestStackable && ItemsCatalog.isItemStackable(requestSlot.id)) {
+        return
       }
     }
     const existingSlot = hotbar[slotIndex]
