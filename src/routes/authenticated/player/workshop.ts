@@ -82,13 +82,13 @@ async function smeltingSlotToAPIResponse(session: ModifiableSession, slot: Works
   else {
     const state = await slot.getState()
 
-    if (Workshop.isActiveSmeltingSlotState(state) && state.completedRounds < state.totalRounds) {
+    if (Workshop.isActiveSmeltingSlotState(state) && Workshop.isActiveFurnaceHeat(state.heat)) {
       response.burning = {
         burnStartTime: new Date(state.heat.burnStartTime),
         burnsUntil: new Date(state.heat.burnEndTime),
         fuel: {
           burnRate: {
-            burnTime: state.heat.fuel.totalBurnDuration,
+            burnTime: state.heat.fuel.burnDuration,
             heatPerSecond: state.heat.fuel.heatPerSecond
           },
           itemId: state.heat.fuel.item.itemId,
@@ -97,18 +97,18 @@ async function smeltingSlotToAPIResponse(session: ModifiableSession, slot: Works
         }
       }
     }
-    else if (state.heatCarriedOver != null) {
+    else if (state.heat != null) {
       response.burning = {
-        remainingBurnTime: '00:00:' + (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed),
-        heatDepleted: state.heatCarriedOver.fuel.heatPerSecond * state.heatCarriedOver.secondsUsed,
+        remainingBurnTime: '00:00:' + Math.floor(state.heat.remainingHeat / state.heat.fuel.heatPerSecond),
+        heatDepleted: state.heat.fuel.totalHeat - state.heat.remainingHeat,
         fuel: {
           burnRate: {
-            burnTime: state.heatCarriedOver.fuel.totalBurnDuration,
-            heatPerSecond: state.heatCarriedOver.fuel.heatPerSecond
+            burnTime: state.heat.fuel.burnDuration,
+            heatPerSecond: state.heat.fuel.heatPerSecond
           },
-          itemId: state.heatCarriedOver.fuel.item.itemId,
-          quantity: Workshop.isStackableSmeltingInputItems(state.heatCarriedOver.fuel.item) ? state.heatCarriedOver.fuel.item.count : state.heatCarriedOver.fuel.item.instances.length,
-          itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.heatCarriedOver.fuel.item) ? null : state.heatCarriedOver.fuel.item.instances.map(instance => instance.instanceId)
+          itemId: state.heat.fuel.item.itemId,
+          quantity: Workshop.isStackableSmeltingInputItems(state.heat.fuel.item) ? state.heat.fuel.item.count : state.heat.fuel.item.instances.length,
+          itemInstanceIds: Workshop.isStackableSmeltingInputItems(state.heat.fuel.item) ? null : state.heat.fuel.item.instances.map(instance => instance.instanceId)
         }
       }
     }
@@ -116,7 +116,7 @@ async function smeltingSlotToAPIResponse(session: ModifiableSession, slot: Works
     if (Workshop.isActiveSmeltingSlotState(state)) {
       response.fuel = state.fuel != null ? {
         burnRate: {
-          burnTime: state.fuel.totalBurnDuration,
+          burnTime: state.fuel.burnDuration,
           heatPerSecond: state.fuel.heatPerSecond
         },
         itemId: state.fuel.item.itemId,
@@ -125,12 +125,12 @@ async function smeltingSlotToAPIResponse(session: ModifiableSession, slot: Works
       } : null
       response.sessionId = state.sessionId
       response.recipeId = state.recipeId
-      response.output = { itemId: state.output, quantity: 1 }
+      response.output = { itemId: state.outputItemId, quantity: 1 }
       response.escrow = state.input == null ? [] : [Workshop.isStackableSmeltingInputItems(state.input) ? { itemId: state.input.itemId, quantity: state.input.count, itemInstanceIds: null } : { itemId: state.input.itemId, quantity: state.input.instances.length, instanceIds: state.input.instances.map(instance => instance.instanceId) }]
       response.completed = state.completedRounds
       response.available = state.availableRounds
       response.total = state.totalRounds
-      response.nextCompletionUtc = state.completedRounds < state.totalRounds ? new Date(state.nextCompletionTime) : null
+      response.nextCompletionUtc = state.completedRounds < state.totalRounds ? new Date(state.currentRoundEndTime) : null
       response.totalCompletionUtc = new Date(state.endTime)
       response.state = state.completedRounds == state.totalRounds ? 'Completed' : 'Active'
     }
@@ -515,8 +515,11 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/start', true, async (req, re
     }
     await slot.updateState()
     const state = await slot.getState()
-    const requiredFuelCount = Math.ceil((recipe.heatRequired * request.value.multiplier - (state.heatCarriedOver != null ? (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed) * state.heatCarriedOver.fuel.heatPerSecond : 0)) / (fuelItem.burnRate.burnTime * fuelItem.burnRate.heatPerSecond))
-    const collectedFuel = await collectRequestItemFromInventory(player, request.value.fuel, requiredFuelCount)
+    const requiredFuelCount = Math.ceil((recipe.heatRequired * request.value.multiplier - (state.heat != null ? state.heat.remainingHeat : 0)) / (fuelItem.burnRate.burnTime * fuelItem.burnRate.heatPerSecond))
+    if (request.value.fuel.quantity < requiredFuelCount) {
+      return
+    }
+    const collectedFuel = await collectRequestItemFromInventory(player, request.value.fuel, request.value.fuel.quantity)
     if (collectedFuel == null) {
       return
     }
@@ -526,9 +529,22 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/start', true, async (req, re
     fuel = null
   }
 
-  if (await slot.start(request.value.sessionId, request.value.recipeId, request.value.multiplier, input, fuel)) {
+  const startResult = await slot.start(request.value.sessionId, request.value.recipeId, request.value.multiplier, input, fuel)
+  if (startResult.success) {
+    if (startResult.oldFuel != null) {
+      if (Workshop.isStackableSmeltingInputItems(startResult.oldFuel)) {
+        await player.inventory.addItemsToInventory(startResult.oldFuel.itemId, startResult.oldFuel.count)
+      }
+      else {
+        for (const instance of startResult.oldFuel.instances) {
+          await player.inventory.addExistingNonStackableItemToInventory(startResult.oldFuel.itemId, instance.instanceId, instance.item)
+        }
+      }
+    }
+
     session.invalidateSequence('smelting')
     session.invalidateSequence('inventory')
+
     return {}
   }
   else {
@@ -593,16 +609,6 @@ wrap(router, 'post', '/api/v1.1/smelting/:slotIndex/stop', true, async (req, res
     else {
       for (const instance of items.input.instances) {
         await player.inventory.addExistingNonStackableItemToInventory(items.input.itemId, instance.instanceId, instance.item)
-      }
-    }
-    if (items.fuel != null) {
-      if (Workshop.isStackableSmeltingInputItems(items.fuel)) {
-        await player.inventory.addItemsToInventory(items.fuel.itemId, items.fuel.count)
-      }
-      else {
-        for (const instance of items.fuel.instances) {
-          await player.inventory.addExistingNonStackableItemToInventory(items.fuel.itemId, instance.instanceId, instance.item)
-        }
       }
     }
   }

@@ -323,58 +323,108 @@ export interface NonStackableSmeltingInputItems { itemId: string, instances: { i
 export type SmeltingSlotState = ActiveSmeltingSlotState | EmptySmeltingSlotState
 export interface ActiveSmeltingSlotState {
   fuel: FurnaceFuel | null,
-  heat: ActiveFurnaceHeat,
-  heatCarriedOver: PausedFurnaceHeat | null,
+  heat: ActiveFurnaceHeat | PausedFurnaceHeat,
   sessionId: string,
   recipeId: string,
   input: SmeltingInputItems | null,
-  output: string,
+  outputItemId: string,
   completedRounds: number,
   availableRounds: number,
   totalRounds: number,
-  startTime: number,
   endTime: number,
-  nextCompletionTime: number
+  heatRequiredPerRound: number,
+  currentRoundRequiredHeat: number,
+  currentRoundEndTime: number
 }
 export interface EmptySmeltingSlotState {
-  heatCarriedOver: PausedFurnaceHeat | null
+  fuel: FurnaceFuel | null,
+  heat: PausedFurnaceHeat | null
 }
 export interface FurnaceFuel {
   item: SmeltingInputItems,
-  singleBurnDuration: number,
-  totalBurnDuration: number,
-  heatPerSecond: number
+  burnDuration: number,
+  heatPerSecond: number,
+  totalHeat: number
 }
 export interface ActiveFurnaceHeat {
   fuel: FurnaceFuel,
-  secondsUsedCarriedOver: number,
+  remainingHeat: number,
+  burning: true,
   burnStartTime: number,
-  burnEndTime: number
+  burnEndTime: number,
+  remainingHeatAtBurnStart: number
 }
 export interface PausedFurnaceHeat {
   fuel: FurnaceFuel,
-  secondsUsed: number
+  remainingHeat: number,
+  burning: false
 }
 export function isActiveSmeltingSlotState(state: SmeltingSlotState): state is ActiveSmeltingSlotState {
   return 'sessionId' in state
 }
 export function isActiveFurnaceHeat(heat: ActiveFurnaceHeat | PausedFurnaceHeat): heat is ActiveFurnaceHeat {
-  return 'startTime' in heat
+  return heat.burning
 }
 export function isStackableSmeltingInputItems(item: SmeltingInputItems): item is StackableSmeltingInputItems {
   return 'count' in item
 }
 
-function calculateDurationForRounds(requiredHeatPerRound: number, rounds: number, heatCarriedOver: PausedFurnaceHeat | null, fuel: FurnaceFuel | null) {
-  const requiredHeat = requiredHeatPerRound * rounds
+function calculateDurationForHeat(requiredHeat: number, currentFurnceHeat: ActiveFurnaceHeat | PausedFurnaceHeat | null, queuedFuel: FurnaceFuel | null) {
   var duration = 0
-  if (heatCarriedOver != null) {
-    duration += Math.min(requiredHeat / heatCarriedOver.fuel.heatPerSecond, heatCarriedOver.fuel.totalBurnDuration - heatCarriedOver.secondsUsed)
+  if (currentFurnceHeat != null) {
+    const obtainedHeat = currentFurnceHeat.remainingHeat > requiredHeat ? requiredHeat : currentFurnceHeat.remainingHeat
+    duration += obtainedHeat / currentFurnceHeat.fuel.heatPerSecond
+    requiredHeat -= obtainedHeat
   }
-  if (fuel != null) {
-    duration += Math.max(requiredHeat - (heatCarriedOver != null ? (heatCarriedOver.fuel.totalBurnDuration - heatCarriedOver.secondsUsed) * heatCarriedOver.fuel.heatPerSecond : 0), 0) / fuel.heatPerSecond
+  if (queuedFuel != null) {
+    duration += requiredHeat / queuedFuel.heatPerSecond
   }
   return duration
+}
+
+function takeNextFuelItem(state: ActiveSmeltingSlotState) {
+  const fuel = state.fuel
+  assert(fuel != null)
+
+  var item: SmeltingInputItems
+  if (isStackableSmeltingInputItems(fuel.item)) {
+    fuel.item.count--
+    if (fuel.item.count == 0) {
+      state.fuel = null
+    }
+
+    item = {
+      itemId: fuel.item.itemId,
+      count: 1
+    }
+  }
+  else {
+    const instance = fuel.item.instances.shift()
+    assert(instance !== undefined)
+    if (fuel.item.instances.length == 0) {
+      state.fuel = null
+    }
+
+    item = {
+      itemId: fuel.item.itemId,
+      instances: [instance]
+    }
+  }
+
+  assert(isActiveFurnaceHeat(state.heat))
+  state.heat = {
+    fuel: {
+      item: item,
+      burnDuration: fuel.burnDuration,
+      heatPerSecond: fuel.heatPerSecond,
+      totalHeat: fuel.totalHeat
+    },
+    remainingHeat: fuel.totalHeat,
+    burning: true,
+    burnStartTime: state.heat.burnEndTime,
+    burnEndTime: state.heat.burnEndTime + fuel.burnDuration * 1000,
+    remainingHeatAtBurnStart: fuel.totalHeat
+  }
 }
 
 export class SmeltingSlot extends WorkshopSlot {
@@ -398,7 +448,7 @@ export class SmeltingSlot extends WorkshopSlot {
 
   async getState(): Promise<SmeltingSlotState> {
     if (this.state == null) {
-      this.state = await this.player.transaction.get('player', this.player.userId, 'workshop.smelting.' + this.slotIndex) as SmeltingSlotState | null ?? { heatCarriedOver: null }
+      this.state = await this.player.transaction.get('player', this.player.userId, 'workshop.smelting.' + this.slotIndex) as SmeltingSlotState | null ?? { fuel: null, heat: null }
     }
     return this.state
   }
@@ -407,73 +457,61 @@ export class SmeltingSlot extends WorkshopSlot {
     const now = new Date().getTime()
 
     const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { heatCarriedOver: null })
-
     if (isActiveSmeltingSlotState(state)) {
-      const recipe = RecipesCatalog.getSmeltingRecipe(state.recipeId)
-      if (recipe == null) {
-        return false
-      }
-
       var changed = false
-      while (state.completedRounds < state.totalRounds && now >= state.nextCompletionTime - config.craftingGracePeriod) {
-        if (state.input != null) {
-          if (isStackableSmeltingInputItems(state.input)) {
-            state.input.count--
-            if (state.input.count == 0) {
-              state.input = null
-            }
+
+      while (state.completedRounds < state.totalRounds && now >= state.currentRoundEndTime - config.craftingGracePeriod) {
+        assert(state.input != null)
+        if (isStackableSmeltingInputItems(state.input)) {
+          state.input.count--
+          if (state.input.count == 0) {
+            state.input = null
           }
-          else {
-            state.input.instances.shift()
-            if (state.input.instances.length == 0) {
-              state.input = null
-            }
+        }
+        else {
+          state.input.instances.shift()
+          if (state.input.instances.length == 0) {
+            state.input = null
           }
-          await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.input', state.input)
         }
 
-        if (state.nextCompletionTime > state.heat.burnEndTime) {
-          state.heat = {
-            fuel: state.fuel as FurnaceFuel,
-            secondsUsedCarriedOver: 0,
-            burnStartTime: state.heat.burnEndTime,
-            burnEndTime: state.heat.burnEndTime + (state.fuel as FurnaceFuel).totalBurnDuration * 1000
-          }
-          await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.heat', state.heat)
+        while (state.currentRoundRequiredHeat > state.heat.remainingHeat) {
+          state.currentRoundRequiredHeat -= state.heat.remainingHeat
+          takeNextFuelItem(state)
         }
-
-        state.nextCompletionTime = state.startTime + calculateDurationForRounds(recipe.heatRequired, state.completedRounds + 2, state.heatCarriedOver, state.fuel) * 1000
-        await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.nextCompletionTime', state.nextCompletionTime)
+        state.heat.remainingHeat -= state.currentRoundRequiredHeat
 
         state.completedRounds++
         state.availableRounds++
-        await this.player.transaction.increment('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.completedRounds', 1)
-        await this.player.transaction.increment('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.availableRounds', 1)
+        state.currentRoundRequiredHeat = state.heatRequiredPerRound
+        state.currentRoundEndTime = state.currentRoundEndTime + calculateDurationForHeat(state.heatRequiredPerRound, state.heat, state.fuel) * 1000
 
         if (state.completedRounds == state.totalRounds) {
-          state.heatCarriedOver = {
+          state.heat = {
             fuel: state.heat.fuel,
-            secondsUsed: state.heat.secondsUsedCarriedOver + Math.ceil((state.endTime - state.heat.burnStartTime) / 1000)
+            remainingHeat: state.heat.remainingHeat,
+            burning: false
           }
-          if (state.heatCarriedOver.secondsUsed >= state.heatCarriedOver.fuel.totalBurnDuration) {
-            state.heatCarriedOver = null
-          }
-          await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.heatCarriedOver', state.heatCarriedOver)
         }
 
         changed = true
       }
-      if (state.completedRounds < state.totalRounds && now > state.heat.burnEndTime) {
-        state.heat = {
-          fuel: state.fuel as FurnaceFuel,
-          secondsUsedCarriedOver: 0,
-          burnStartTime: state.heat.burnEndTime,
-          burnEndTime: state.heat.burnEndTime + (state.fuel as FurnaceFuel).totalBurnDuration * 1000
-        }
-        await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.heat', state.heat)
+      if (state.completedRounds < state.totalRounds) {
+        assert(isActiveFurnaceHeat(state.heat))
+        while (now > state.heat.burnEndTime) {
+          if (state.currentRoundRequiredHeat < state.heat.remainingHeat) {
+            break
+          }
+          state.currentRoundRequiredHeat -= state.heat.remainingHeat
 
-        changed = true
+          takeNextFuelItem(state)
+
+          changed = true
+        }
+      }
+
+      if (changed) {
+        await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, state)
       }
 
       return changed
@@ -483,86 +521,122 @@ export class SmeltingSlot extends WorkshopSlot {
     }
   }
 
-  async start(sessionId: string, recipeId: string, rounds: number, input: SmeltingInputItems, fuel: SmeltingInputItems | null): Promise<boolean> {
+  async start(sessionId: string, recipeId: string, rounds: number, input: SmeltingInputItems, fuel: SmeltingInputItems | null): Promise<{ success: false } | { success: true, oldFuel: SmeltingInputItems | null }> {
     const now = new Date().getTime()
 
     const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { heatCarriedOver: null })
+    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { fuel: null, heat: null })
 
     if (isActiveSmeltingSlotState(state)) {
-      return false
+      return { success: false }
     }
 
     const recipe = RecipesCatalog.getSmeltingRecipe(recipeId)
     if (recipe == null) {
-      return false
+      return { success: false }
     }
 
     if (fuel != null && ItemsCatalog.getItem(fuel.itemId).fuelReturnItems.length != 0) {
-      // TODO: figure out how returnItems are supposed to be implemented
-      return false
+      // TODO: implement returnItems
+      return { success: false }
     }
     const addedFuel: FurnaceFuel | null = fuel != null ? {
       item: fuel,
-      singleBurnDuration: ItemsCatalog.getItem(fuel.itemId).burnRate.burnTime,
-      totalBurnDuration: ItemsCatalog.getItem(fuel.itemId).burnRate.burnTime * (isStackableSmeltingInputItems(fuel) ? fuel.count : fuel.instances.length),
-      heatPerSecond: ItemsCatalog.getItem(fuel.itemId).burnRate.heatPerSecond
+      burnDuration: ItemsCatalog.getItem(fuel.itemId).burnRate.burnTime,
+      heatPerSecond: ItemsCatalog.getItem(fuel.itemId).burnRate.heatPerSecond,
+      totalHeat: ItemsCatalog.getItem(fuel.itemId).burnRate.burnTime * ItemsCatalog.getItem(fuel.itemId).burnRate.heatPerSecond
     } : null
 
     if (input.itemId != recipe.input) {
-      return false
+      return { success: false }
     }
     if ((isStackableSmeltingInputItems(input) ? input.count : input.instances.length) != rounds) {
-      return false
+      return { success: false }
     }
     const requiredHeat = recipe.heatRequired * rounds
     var availableHeat = 0
-    if (state.heatCarriedOver != null) {
-      availableHeat += state.heatCarriedOver.fuel.heatPerSecond * (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed)
+    if (state.heat != null) {
+      availableHeat += state.heat.remainingHeat
     }
     if (addedFuel != null) {
-      availableHeat += addedFuel.heatPerSecond * addedFuel.totalBurnDuration
+      availableHeat += addedFuel.totalHeat * (isStackableSmeltingInputItems(addedFuel.item) ? addedFuel.item.count : addedFuel.item.instances.length)
     }
     if (availableHeat < requiredHeat) {
-      return false
+      return { success: false }
     }
 
+    var newHeat: ActiveFurnaceHeat
+    if (state.heat != null) {
+      newHeat = {
+        fuel: state.heat.fuel,
+        remainingHeat: state.heat.remainingHeat,
+        burning: true,
+        burnStartTime: now,
+        burnEndTime: now + (state.heat.remainingHeat / state.heat.fuel.heatPerSecond) * 1000,
+        remainingHeatAtBurnStart: state.heat.remainingHeat
+      }
+    }
+    else {
+      assert(addedFuel != null)
+      var item: SmeltingInputItems
+      if (isStackableSmeltingInputItems(addedFuel.item)) {
+        addedFuel.item.count--
+        item = {
+          itemId: addedFuel.item.itemId,
+          count: 1
+        }
+      }
+      else {
+        const instance = addedFuel.item.instances.shift()
+        assert(instance !== undefined)
+        item = {
+          itemId: addedFuel.item.itemId,
+          instances: [instance]
+        }
+      }
+      newHeat = {
+        fuel: {
+          item: item,
+          heatPerSecond: addedFuel.heatPerSecond,
+          burnDuration: addedFuel.burnDuration,
+          totalHeat: addedFuel.totalHeat
+        },
+        remainingHeat: addedFuel.totalHeat,
+        burning: true,
+        burnStartTime: now,
+        burnEndTime: now + addedFuel.burnDuration * 1000,
+        remainingHeatAtBurnStart: addedFuel.totalHeat
+      }
+    }
+
+    const oldFuel = addedFuel != null ? state.fuel : null
+
     const newState: ActiveSmeltingSlotState = {
-      fuel: addedFuel,
-      heat: state.heatCarriedOver != null ? {
-        fuel: state.heatCarriedOver.fuel,
-        secondsUsedCarriedOver: state.heatCarriedOver.secondsUsed,
-        burnStartTime: now,
-        burnEndTime: now + (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed) * 1000
-      } : {
-        fuel: addedFuel as FurnaceFuel,
-        secondsUsedCarriedOver: 0,
-        burnStartTime: now,
-        burnEndTime: now + (addedFuel as FurnaceFuel).totalBurnDuration * 1000
-      },
-      heatCarriedOver: state.heatCarriedOver,
+      fuel: addedFuel == null ? state.fuel : (addedFuel != null && (isStackableSmeltingInputItems(addedFuel.item) ? addedFuel.item.count > 0 : addedFuel.item.instances.length > 0) ? addedFuel : null),
+      heat: newHeat,
       sessionId: sessionId,
       recipeId: recipeId,
       input: input,
-      output: recipe.output,
+      outputItemId: recipe.output,
       completedRounds: 0,
       availableRounds: 0,
       totalRounds: rounds,
-      startTime: now,
-      endTime: now + calculateDurationForRounds(recipe.heatRequired, rounds, state.heatCarriedOver, addedFuel) * 1000,
-      nextCompletionTime: now + calculateDurationForRounds(recipe.heatRequired, 1, state.heatCarriedOver, addedFuel) * 1000
+      endTime: now + calculateDurationForHeat(recipe.heatRequired * rounds, state.heat, addedFuel) * 1000,
+      heatRequiredPerRound: recipe.heatRequired,
+      currentRoundRequiredHeat: recipe.heatRequired,
+      currentRoundEndTime: now + calculateDurationForHeat(recipe.heatRequired, state.heat, addedFuel) * 1000
     }
     this.state = newState
     await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, newState)
 
-    return true
+    return { success: true, oldFuel: oldFuel != null ? oldFuel.item : null }
   }
 
   async collect(): Promise<{ itemId: string, count: number } | null> {
     await this.updateState()
 
     const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { heatCarriedOver: null })
+    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { fuel: null, heat: null })
 
     if (!isActiveSmeltingSlotState(state)) {
       return null
@@ -572,10 +646,12 @@ export class SmeltingSlot extends WorkshopSlot {
       return null
     }
 
-    const items = { itemId: state.output, count: state.availableRounds }
+    const items = { itemId: state.outputItemId, count: state.availableRounds }
     if (state.completedRounds == state.totalRounds) {
+      assert(!isActiveFurnaceHeat(state.heat))
       this.state = {
-        heatCarriedOver: state.heatCarriedOver
+        fuel: state.fuel,
+        heat: state.heat.remainingHeat > 0 ? state.heat : null
       }
       await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, this.state)
     }
@@ -587,47 +663,57 @@ export class SmeltingSlot extends WorkshopSlot {
     return items
   }
 
-  async cancel(): Promise<{ output: { itemId: string, count: number } | null, input: SmeltingInputItems, fuel: SmeltingInputItems | null } | null> {
+  async cancel(): Promise<{ output: { itemId: string, count: number } | null, input: SmeltingInputItems } | null> {
     await this.updateState()
 
     const now = new Date().getTime()
 
     const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, {})
+    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { fuel: null, heat: null })
 
     if (!isActiveSmeltingSlotState(state)) {
       return null
     }
 
-    const output = { itemId: state.output, count: state.availableRounds }
+    const output = { itemId: state.outputItemId, count: state.availableRounds }
 
     if (state.input == null) {
       return null
     }
     const unusedInput: SmeltingInputItems = state.input
 
-    const unusedFuel: SmeltingInputItems | null = state.heatCarriedOver != null && state.heat.burnStartTime == state.startTime ? (state.fuel != null ? state.fuel.item : null) : null
-    const usedFuelTime = Math.ceil((now - state.heat.burnStartTime) / 1000)
-    this.state = {
-      heatCarriedOver: {
-        fuel: state.heat.fuel,
-        secondsUsed: state.heat.secondsUsedCarriedOver + usedFuelTime
+    var newHeat: PausedFurnaceHeat | null
+    if (isActiveFurnaceHeat(state.heat)) {
+      const usedFuelHeat = Math.ceil(((now - state.heat.burnStartTime) / 1000) * state.heat.fuel.heatPerSecond) - (state.heat.remainingHeatAtBurnStart - state.heat.remainingHeat)
+      if (usedFuelHeat >= state.heat.remainingHeat) {
+        newHeat = null
+      }
+      else {
+        newHeat = {
+          fuel: state.heat.fuel,
+          remainingHeat: state.heat.remainingHeat - usedFuelHeat,
+          burning: false
+        }
       }
     }
-    if (this.state.heatCarriedOver != null && this.state.heatCarriedOver.secondsUsed >= this.state.heatCarriedOver.fuel.totalBurnDuration) {
-      this.state.heatCarriedOver = null
+    else {
+      newHeat = state.heat
+    }
+    this.state = {
+      fuel: state.fuel,
+      heat: newHeat
     }
 
     await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, this.state)
 
-    return { output: output.count > 0 ? output : null, input: unusedInput, fuel: unusedFuel }
+    return { output: output.count > 0 ? output : null, input: unusedInput }
   }
 
   async finishNow(): Promise<boolean> {
     await this.updateState()
 
     const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, {})
+    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, { fuel: null, heat: null })
 
     if (!isActiveSmeltingSlotState(state)) {
       return false
@@ -638,34 +724,24 @@ export class SmeltingSlot extends WorkshopSlot {
     }
 
     state.input = null
-    await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.input', null)
 
-    const recipe = RecipesCatalog.getSmeltingRecipe(state.recipeId) as SmeltingRecipe
-    const requiredHeat = recipe.heatRequired * state.totalRounds
-    const heatCarriedOver = state.heatCarriedOver != null ? (state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed) * state.heatCarriedOver.fuel.heatPerSecond : 0
-    if (requiredHeat > heatCarriedOver) {
-      const burnStartTime = state.startTime + (state.heatCarriedOver != null ? state.heatCarriedOver.fuel.totalBurnDuration - state.heatCarriedOver.secondsUsed : 0) * 1000
-      state.heat = {
-        fuel: state.fuel as FurnaceFuel,
-        secondsUsedCarriedOver: 0,
-        burnStartTime: burnStartTime,
-        burnEndTime: burnStartTime + (state.fuel as FurnaceFuel).totalBurnDuration * 1000
-      }
+    var requiredHeat = state.heatRequiredPerRound * (state.totalRounds - state.completedRounds) + state.currentRoundRequiredHeat
+    while (requiredHeat > state.heat.remainingHeat) {
+      requiredHeat -= state.heat.remainingHeat
+      takeNextFuelItem(state)
     }
-    state.heatCarriedOver = {
+    state.heat.remainingHeat -= requiredHeat
+
+    state.heat = {
       fuel: state.heat.fuel,
-      secondsUsed: state.heat.secondsUsedCarriedOver + Math.ceil((requiredHeat > heatCarriedOver ? requiredHeat - heatCarriedOver : requiredHeat) / state.heat.fuel.heatPerSecond)
+      remainingHeat: state.heat.remainingHeat,
+      burning: false
     }
-    if (state.heatCarriedOver.secondsUsed >= state.heatCarriedOver.fuel.totalBurnDuration) {
-      state.heatCarriedOver = null
-    }
-    await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.heat', state.heat)
-    await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.heatCarriedOver', state.heatCarriedOver)
 
     state.availableRounds = state.availableRounds + (state.totalRounds - state.completedRounds)
     state.completedRounds = state.totalRounds
-    await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.availableRounds', state.availableRounds)
-    await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex + '.completedRounds', state.completedRounds)
+
+    await this.player.transaction.set('player', this.player.userId, 'workshop.smelting.' + this.slotIndex, state)
 
     return true
   }
