@@ -63,23 +63,22 @@ export class WorkshopSlot {
 export type CraftingInputItem = StackableCraftingInputItem | NonStackableCraftingInputItem
 export interface StackableCraftingInputItem { itemId: string, count: number }
 export interface NonStackableCraftingInputItem { itemId: string, instances: { instanceId: string, item: Inventory.NonStackableItemInstance }[] }
-export type CraftingSlotState = ActiveCraftingSlotState | EmptyCraftingSlotState
-export interface ActiveCraftingSlotState {
+export interface CraftingSlotSessionState {
   sessionId: string,
   recipeId: string,
-  input: CraftingInputItem[] | null,
+  startTime: number,
+  input: CraftingInputItem[],
+  totalRounds: number,
+  collectedRounds: number,
+  finishedEarly: boolean
+}
+export interface CraftingSlotInstantState {
+  input: CraftingInputItem[],
   output: { itemId: string, count: number },
   completedRounds: number,
   availableRounds: number,
-  totalRounds: number,
   nextCompletionTime: number | null,
   totalCompletionTime: number
-}
-export interface EmptyCraftingSlotState {
-  // empty
-}
-export function isActiveCraftingSlotState(state: CraftingSlotState): state is ActiveCraftingSlotState {
-  return 'sessionId' in state
 }
 export function isStackableCraftingInputItem(item: CraftingInputItem): item is StackableCraftingInputItem {
   return 'count' in item
@@ -96,63 +95,63 @@ export class CraftingSlot extends WorkshopSlot {
     }
   }
 
-  private state: CraftingSlotState | null
+  static getInstantState(sessionState: CraftingSlotSessionState, now: number): CraftingSlotInstantState {
+    const recipe = RecipesCatalog.getCraftingRecipe(sessionState.recipeId)
+    assert(recipe != null)
+
+    const completedRounds = sessionState.finishedEarly ? sessionState.totalRounds : Math.min(Math.floor((now - sessionState.startTime) / (recipe.duration * 1000)), sessionState.totalRounds)
+    const availableRounds = completedRounds - sessionState.collectedRounds
+    const nextCompletionTime = completedRounds >= sessionState.totalRounds ? null : (sessionState.startTime + (completedRounds + 1) * recipe.duration * 1000)
+    const totalCompletionTime = sessionState.startTime + sessionState.totalRounds * recipe.duration * 1000
+
+    const input = sessionState.input.map(item => isStackableCraftingInputItem(item) ? { itemId: item.itemId, count: item.count } : { itemId: item.itemId, instances: item.instances.map(instance => instance) })
+    for (const ingredient of recipe.input) {
+      var requiredCount = ingredient.count * completedRounds
+      for (const item of input) {
+        if (ingredient.itemIds.includes(item.itemId)) {
+          if (isStackableCraftingInputItem(item)) {
+            const takenCount = Math.min(requiredCount, item.count)
+            requiredCount -= takenCount
+            item.count -= takenCount
+          }
+          else {
+            while (requiredCount > 0 && item.instances.length > 0) {
+              requiredCount--
+              item.instances.shift()
+            }
+          }
+        }
+      }
+      assert(requiredCount == 0)
+    }
+    const output = { itemId: recipe.output.itemId, count: recipe.output.count * availableRounds }
+
+    return {
+      input: input.filter(item => isStackableCraftingInputItem(item) ? item.count > 0 : item.instances.length > 0),
+      output: output,
+      completedRounds: completedRounds,
+      availableRounds: availableRounds,
+      nextCompletionTime: nextCompletionTime,
+      totalCompletionTime: totalCompletionTime
+    }
+  }
 
   constructor(player: Player, slotIndex: number) {
     super(player, slotIndex, 'crafting')
-
-    this.state = null
   }
 
-  async getState(): Promise<CraftingSlotState> {
-    if (this.state == null) {
-      this.state = await this.player.transaction.get('player', this.player.userId, 'workshop.crafting.' + this.slotIndex) as CraftingSlot | null ?? {}
-    }
-    return this.state
+  async getSessionState(): Promise<CraftingSlotSessionState | null> {
+    return await this.player.transaction.get('player', this.player.userId, 'workshop.crafting.' + this.slotIndex) as CraftingSlotSessionState | null
   }
 
-  async updateState(): Promise<boolean> {
-    const now = new Date().getTime()
-
-    const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
-
-    if (isActiveCraftingSlotState(state)) {
-      const recipe = RecipesCatalog.getCraftingRecipe(state.recipeId)
-      if (recipe == null) {
-        return false
-      }
-
-      var changed = false
-      while (state.nextCompletionTime != null && now >= state.nextCompletionTime - config.craftingGracePeriod) {
-        state.completedRounds++
-        state.availableRounds++
-        state.nextCompletionTime = state.completedRounds == state.totalRounds ? null : state.nextCompletionTime + recipe.duration * 1000
-        await this.player.transaction.increment('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.completedRounds', 1)
-        await this.player.transaction.increment('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.availableRounds', 1)
-        await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.nextCompletionTime', state.nextCompletionTime)
-        if (state.completedRounds == state.totalRounds) {
-          // TODO: decide/determine if we are supposed to do this
-          //state.input = null
-          //this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.input', null)
-        }
-        changed = true
-      }
-
-      return changed
-    }
-    else {
-      return false
-    }
+  private async setSessionState(state: CraftingSlotSessionState | null) {
+    await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, state)
   }
 
   async start(sessionId: string, recipeId: string, rounds: number, ingredients: CraftingInputItem[]): Promise<boolean> {
     const now = new Date().getTime()
 
-    const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
-
-    if (isActiveCraftingSlotState(state)) {
+    if (await this.getSessionState() != null) {
       return false
     }
 
@@ -180,138 +179,69 @@ export class CraftingSlot extends WorkshopSlot {
       return false
     }
 
-    const newState: ActiveCraftingSlotState = {
+    const sessionState: CraftingSlotSessionState = {
       sessionId: sessionId,
       recipeId: recipeId,
+      startTime: now,
       input: ingredients,
-      output: { itemId: recipe.output.itemId, count: recipe.output.count },
-      completedRounds: 0,
-      availableRounds: 0,
       totalRounds: rounds,
-      nextCompletionTime: now + recipe.duration * 1000,
-      totalCompletionTime: now + recipe.duration * 1000 * rounds
+      collectedRounds: 0,
+      finishedEarly: false
     }
-    this.state = newState
-    await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, newState)
+    await this.setSessionState(sessionState)
 
     return true
   }
 
   async collect(): Promise<{ itemId: string, count: number } | null> {
-    await this.updateState()
+    const now = new Date().getTime()
 
-    const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
-
-    if (!isActiveCraftingSlotState(state)) {
+    const sessionState = await this.getSessionState()
+    if (sessionState == null) {
       return null
     }
+    const instantState = CraftingSlot.getInstantState(sessionState, now)
 
-    if (state.availableRounds == 0) {
-      return null
-    }
-
-    const items = { itemId: state.output.itemId, count: state.output.count * state.availableRounds }
-    if (state.nextCompletionTime == null) {
-      this.state = {}
-      await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
+    sessionState.collectedRounds += instantState.availableRounds
+    if (sessionState.collectedRounds == sessionState.totalRounds) {
+      await this.setSessionState(null)
     }
     else {
-      state.availableRounds = 0
-      await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.availableRounds', 0)
+      await this.setSessionState(sessionState)
     }
 
-    return items
+    return instantState.output
   }
 
-  async cancel(): Promise<{ output: { itemId: string, count: number } | null, input: CraftingInputItem[] } | null> {
-    await this.updateState()
+  async cancel(): Promise<{ output: { itemId: string, count: number }, input: CraftingInputItem[] } | null> {
+    const now = new Date().getTime()
 
-    const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
-
-    if (!isActiveCraftingSlotState(state)) {
+    const sessionState = await this.getSessionState()
+    if (sessionState == null) {
       return null
     }
+    const instantState = CraftingSlot.getInstantState(sessionState, now)
 
-    const items = { itemId: state.output.itemId, count: state.output.count * state.availableRounds }
+    await this.setSessionState(null)
 
-    var unusedIngredients: CraftingInputItem[] = []
-    if (state.input != null) {
-      const completedRounds = state.completedRounds
-      const recipe = RecipesCatalog.getCraftingRecipe(state.recipeId) as CraftingRecipe
-      var craftingIngredientsStillInInput: CraftingInputItem[] = []
-      var craftingIngredientsRemainingInInput: CraftingInputItem[] = state.input
-      for (const recipeIngredient of recipe.input) {
-        const targetCount = recipeIngredient.count * completedRounds
-        var consumedCount = 0
-        craftingIngredientsStillInInput = craftingIngredientsRemainingInInput
-        craftingIngredientsRemainingInInput = []
-        for (const inputItem of craftingIngredientsStillInInput) {
-          if (recipeIngredient.itemIds.includes(inputItem.itemId)) {
-            if (isStackableCraftingInputItem(inputItem)) {
-              if (consumedCount < targetCount) {
-                if (targetCount - consumedCount >= inputItem.count) {
-                  consumedCount += inputItem.count
-                }
-                else {
-                  craftingIngredientsRemainingInInput.push({ itemId: inputItem.itemId, count: inputItem.count - (targetCount - consumedCount) })
-                  consumedCount = targetCount
-                }
-              }
-              else {
-                craftingIngredientsRemainingInInput.push({ itemId: inputItem.itemId, count: inputItem.count })
-              }
-            }
-            else {
-              const instancesReminingInInput: { instanceId: string, item: Inventory.NonStackableItemInstance }[] = []
-              for (const instance of inputItem.instances) {
-                if (consumedCount < targetCount) {
-                  consumedCount++
-                }
-                else {
-                  instancesReminingInInput.push(instance)
-                }
-              }
-              if (instancesReminingInInput.length != 0) {
-                craftingIngredientsRemainingInInput.push({ itemId: inputItem.itemId, instances: instancesReminingInInput })
-              }
-            }
-          }
-          else {
-            craftingIngredientsRemainingInInput.push(inputItem)
-          }
-        }
-      }
-      unusedIngredients = craftingIngredientsRemainingInInput
-    }
-
-    this.state = {}
-    await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
-
-    return { output: items.count > 0 ? items : null, input: unusedIngredients }
+    return { output: instantState.output, input: instantState.input }
   }
 
   async finishNow(): Promise<boolean> {
-    await this.updateState()
+    const now = new Date().getTime()
 
-    const state = await this.getState()
-    await this.player.transaction.createIfNotExists('player', this.player.userId, 'workshop.crafting.' + this.slotIndex, {})
+    const sessionState = await this.getSessionState()
+    if (sessionState == null) {
+      return false
+    }
+    const instantState = CraftingSlot.getInstantState(sessionState, now)
 
-    if (!isActiveCraftingSlotState(state)) {
+    if (instantState.completedRounds == sessionState.totalRounds) {
       return false
     }
 
-    if (state.nextCompletionTime == null) {
-      return false
-    }
-
-    state.availableRounds = state.availableRounds + (state.totalRounds - state.completedRounds)
-    state.completedRounds = state.totalRounds
-    state.nextCompletionTime = null
-    await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.availableRounds', state.availableRounds)
-    await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.completedRounds', state.completedRounds)
-    await this.player.transaction.set('player', this.player.userId, 'workshop.crafting.' + this.slotIndex + '.nextCompletionTime', state.nextCompletionTime)
+    sessionState.finishedEarly = true
+    await this.setSessionState(sessionState)
 
     return true
   }

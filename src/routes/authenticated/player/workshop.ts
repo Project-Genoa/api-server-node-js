@@ -36,19 +36,21 @@ async function craftingSlotToAPIResponse(session: ModifiableSession, slot: Works
     response.unlockPrice = { cost: lockState.unlockPrice, discount: 0 }
   }
   else {
-    const state = await slot.getState()
-
-    if (Workshop.isActiveCraftingSlotState(state)) {
-      response.sessionId = state.sessionId
-      response.recipeId = state.recipeId
-      response.output = { itemId: state.output.itemId, quantity: state.output.count }
-      response.escrow = state.input == null ? [] : state.input.map(item => Workshop.isStackableCraftingInputItem(item) ? { itemId: item.itemId, quantity: item.count, itemInstanceIds: null } : { itemId: item.itemId, quantity: item.instances.length, instanceIds: item.instances.map(instance => instance.instanceId) }) // TODO: are we supposed to include the item instance info (e.g. health) somewhere?
-      response.completed = state.completedRounds
-      response.available = state.availableRounds
-      response.total = state.totalRounds
-      response.nextCompletionUtc = state.nextCompletionTime != null ? new Date(state.nextCompletionTime) : null
-      response.totalCompletionUtc = new Date(state.totalCompletionTime)
-      response.state = state.nextCompletionTime != null ? 'Active' : 'Completed'
+    const sessionState = await slot.getSessionState()
+    if (sessionState != null) {
+      const instantState = await Workshop.CraftingSlot.getInstantState(sessionState, new Date().getTime())
+      response.sessionId = sessionState.sessionId
+      response.recipeId = sessionState.recipeId
+      response.output = instantState.output.count > 0 ? { itemId: instantState.output.itemId, quantity: instantState.output.count } : null
+      // TODO: I'm using sessionState here rather than instantState because sessionState shows all the input items whereas instantState shows only the ones that haven't been consumed yet - there is some debate as to which behavior is correct
+      // TODO: are we supposed to include the item instance info (e.g. health) somewhere?
+      response.escrow = sessionState.input.map(item => Workshop.isStackableCraftingInputItem(item) ? { itemId: item.itemId, quantity: item.count, itemInstanceIds: null } : { itemId: item.itemId, quantity: item.instances.length, instanceIds: item.instances.map(instance => instance.instanceId) })
+      response.completed = instantState.completedRounds
+      response.available = instantState.availableRounds
+      response.total = sessionState.totalRounds
+      response.nextCompletionUtc = instantState.nextCompletionTime != null ? new Date(instantState.nextCompletionTime) : null
+      response.totalCompletionUtc = new Date(instantState.totalCompletionTime)
+      response.state = instantState.completedRounds == sessionState.totalRounds ? 'Completed' : 'Active'
     }
   }
 
@@ -216,11 +218,6 @@ const PurchaseRequest = Runtypes.Record({
 })
 
 wrap(router, 'get', '/api/v1.1/player/utilityBlocks', false, async (req, res, session, player) => {
-  for (const slot of player.workshop.craftingSlots) {
-    if (await slot.updateState()) {
-      session.invalidateSequence('crafting')
-    }
-  }
   for (const slot of player.workshop.smeltingSlots) {
     if (await slot.updateState()) {
       session.invalidateSequence('smelting')
@@ -254,10 +251,6 @@ wrap(router, 'get', '/api/v1.1/crafting/:slotIndex', true, async (req, res, sess
     return
   }
   const slot = player.workshop.craftingSlots[slotIndex - 1]
-
-  if (await slot.updateState()) {
-    session.invalidateSequence('crafting')
-  }
 
   return await craftingSlotToAPIResponse(session, slot)
 })
@@ -318,7 +311,9 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/collectItems', true, async (
     session.invalidateSequence('inventory')
     session.invalidateSequence('journal')
 
-    await player.inventory.addItemsToInventory(items.itemId, items.count, true)
+    if (items.count > 0) {
+      await player.inventory.addItemsToInventory(items.itemId, items.count, true)
+    }
 
     return {
       rewards: {
@@ -353,7 +348,7 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/stop', true, async (req, res
     session.invalidateSequence('inventory')
     session.invalidateSequence('journal')
 
-    if (items.output != null) {
+    if (items.output.count > 0) {
       await player.inventory.addItemsToInventory(items.output.itemId, items.output.count, true)
     }
     for (const item of items.input) {
@@ -382,11 +377,13 @@ wrap(router, 'post', '/api/v1.1/crafting/:slotIndex/finish', true, async (req, r
     return
   }
 
-  const state = await slot.getState()
-  if (!Workshop.isActiveCraftingSlotState(state)) {
+  const sessionState = await slot.getSessionState()
+  if (sessionState == null) {
     return
   }
-  const remainingTime = Math.ceil((state.totalCompletionTime - new Date().getTime()) / 1000)
+  const instantState = Workshop.CraftingSlot.getInstantState(sessionState, new Date().getTime())
+
+  const remainingTime = Math.ceil((instantState.totalCompletionTime - new Date().getTime()) / 1000)
   if (remainingTime < 0) {
     return
   }
