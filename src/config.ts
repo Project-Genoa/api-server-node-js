@@ -7,9 +7,7 @@ nconf.argv({ parseValues: true }).file({ file: 'config.json' }).defaults({
   sessionExpiryDuration: 3600,
 
   dataLocation: '../data',
-  resourcePackFilename: 'vanilla.zip',
-
-  craftingGracePeriod: 500
+  resourcePackFilename: 'vanilla.zip'
 })
 
 type Config = {
@@ -23,9 +21,7 @@ type Config = {
   playfabId: string,
 
   dataLocation: string,
-  resourcePackFilename: string,
-
-  craftingGracePeriod: number
+  resourcePackFilename: string
 }
 
 const config: Config = {
@@ -39,9 +35,7 @@ const config: Config = {
   playfabId: '20CA2',
 
   dataLocation: nconf.get('dataLocation'),
-  resourcePackFilename: nconf.get('resourcePackFilename'),
-
-  craftingGracePeriod: nconf.get('craftingGracePeriod')
+  resourcePackFilename: nconf.get('resourcePackFilename')
 }
 Object.freeze(config)
 

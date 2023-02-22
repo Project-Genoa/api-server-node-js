@@ -5,8 +5,6 @@ import * as Inventory from './inventory'
 import RecipesCatalog, { CraftingRecipe, SmeltingRecipe } from '../../catalog/recipes'
 import ItemsCatalog from '../../catalog/items'
 
-import config from '../../config'
-
 export default class Workshop {
   readonly player: Player
 
